@@ -11,6 +11,8 @@ from PyPDFForm import PdfWrapper
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
+from pulling_data import *
+from config import *
 
 load_dotenv()
 
@@ -28,17 +30,6 @@ def authenticate_services():
     sheets_service = build('sheets', 'v4', credentials=credentials)
     drive_service = build('drive', 'v3', credentials=credentials)
     return sheets_service, drive_service
-
-def read_all_data_from_sheet(sheets_service, sheet_id, range_name):
-    sheet = sheets_service.spreadsheets()
-    result = sheet.values().get(spreadsheetId=sheet_id, range=range_name).execute()
-    values = result.get('values', [])
-    return values
-
-def add_to_dataframe(data):
-    column_names = data[0]
-    data = data[1:]
-    return pd.DataFrame(data, columns=column_names)
 
 def generate_template_paths():
     template_paths = {
@@ -59,70 +50,97 @@ def generate_template_paths():
 def generate_pdfs(df, template_paths, drive_service):
     total_patients = 0
     pdf_counter = 0
-    template_number_dictionary = {0:0, 1:0, 2:1, 3:1, 4:2, 5:2, 6:2}
     for record in df.itertuples():
         total_patients += 1
         patient = patient_record_dictionary(record)
+        if (patient['First Name'] == None) or (patient['Last Name'] == None) or (patient['DOB'] == None):
+            continue
         patient_full_name = patient['First Name'] + patient['Last Name']
-        template_number = template_number_dictionary[int(patient['Preclaim Status'][0])]
-        if patient['Doc Count'] == 2:
-            for doc_count in [1,2]:
-                patient_folder_path = create_doc_folder(patient_full_name, doc_count)
-                if patient['Consent'] == 0:
-                    pdf_counter = generate_authorization_pdf(patient, patient_folder_path, template_paths['PatientAuthorizationTemplate'], pdf_counter, drive_service)
-                if patient['Prescription'] == "":
-                    pdf_counter = generate_autofilled_prescription(patient, patient_folder_path, template_paths['AutofillPrescription'], pdf_counter)
-                if patient['Prescription'] == "" and patient['Medical Records'] == "":
-                    pdf_counter = generate_request_doc(patient, patient_folder_path, template_paths[f'RXAndMRTemplate_t{template_number}'], pdf_counter, doc_count)
-                elif patient['Prescription'] != "" and patient['Medical Records'] == "":
-                    pdf_counter = generate_request_doc(patient, patient_folder_path, template_paths[f'MRTemplate_t{template_number}'], pdf_counter, doc_count)
-                elif patient['Prescription'] == "" and patient['Medical Records'] != "":
-                    pdf_counter = generate_request_doc(patient, patient_folder_path, template_paths[f'RXTemplate_t{template_number}'], pdf_counter, doc_count)
+        template_index, status_index = calculate_template_number(patient['Timestamp'], patient['Status'])
+        patient_folder_path = create_doc_folder(patient_full_name)
+        pdf_counter = generate_authorization_pdf(patient, patient_folder_path, template_paths['PatientAuthorizationTemplate'], pdf_counter, drive_service)
+        if status_index == 0:
+            pdf_counter = generate_request_doc(patient, patient_folder_path, template_paths[f'RXTemplate_t{template_index}'], pdf_counter)
+        elif status_index == 1:
+            pdf_counter = generate_request_doc(patient, patient_folder_path, template_paths[f'MRTemplate_t{template_index}'], pdf_counter)
         else:
-            patient_folder_path = create_doc_folder(patient_full_name, 1)
-            if patient['Consent'] == 0:
-                pdf_counter = generate_authorization_pdf(patient, patient_folder_path, template_paths['PatientAuthorizationTemplate'], pdf_counter, drive_service)
-            if patient['Prescription'] == "":
-                pdf_counter = generate_autofilled_prescription(patient, patient_folder_path, template_paths['AutofillPrescription'], pdf_counter)
-            if patient['Prescription'] == "" and patient['Medical Records'] == "":
-                pdf_counter = generate_request_doc(patient, patient_folder_path, template_paths[f'RXAndMRTemplate_t{template_number}'], pdf_counter, 1)
-            elif patient['Prescription'] != "" and patient['Medical Records'] == "":
-                pdf_counter = generate_request_doc(patient, patient_folder_path, template_paths[f'MRTemplate_t{template_number}'], pdf_counter, 1)
-            elif patient['Prescription'] == "" and patient['Medical Records'] != "":
-                pdf_counter = generate_request_doc(patient, patient_folder_path, template_paths[f'RXTemplate_t{template_number}'], pdf_counter, 1)
-                
+            pdf_counter = generate_request_doc(patient, patient_folder_path, template_paths[f'RXAndMRTemplate_t{template_index}'], pdf_counter)
+        if (status_index == 0) or (status_index == 2):
+            pdf_counter = generate_autofilled_prescription(patient, patient_folder_path, template_paths['AutofillPrescription'], pdf_counter)
     return (total_patients, pdf_counter)
 
 def patient_record_dictionary(record):
     patient = {
-        'index': record[0],
-        'Timestamp': record[1],
-        'PatientID': record[3],
-        'First Name': record[4],
-        'Last Name': record[5],
-        'DOB': record[6],
-        'Product': record[7],
-        'Phone Number': record[8],
-        'Patient Email': record[9],
-        'Address': record[10],
-        'City': record[11],
-        'State': record[12],
-        'Zipcode': record[13],
-        'Prim Doc Name': record[14],
-        'Prim Doc Fax': record[15],
-        'Sec Doc Name': record[16],
-        'Sec Doc Fax': record[17],
-        'Prescription': record[18],
-        'Medical Records': record[19],
-        'Consent': 0 if record[20] else 1,
-        'AuthorizationPDFLink': record[21],
-        'Preclaim Status': record[22],
-        'Doc Count': 2 if record[16] != "" or record[17] != "" else 1
+        'story_id': record[1],
+        'Timestamp': record[2],
+        'First Name': record[3],
+        'Last Name': record[4],
+        'DOB': record[5],
+        'Product': record[6],
+        'Phone Number': record[7],
+        'Patient Email': record[8],
+        'Address': record[9],
+        'City': record[10],
+        'State': record[11],
+        'Zipcode': record[12],
+        'Prim Doc Name': record[13],
+        'Prim Doc Fax': record[14],
+        'Status': record[15],
+        'AuthorizationPDFLink': record[16]
     }
     return patient
 
-def create_doc_folder(patient_full_name, doc_count):
-    doc_folder_path = os.path.join(PARENT_FOLDER, f"{patient_full_name}_RequestDocs", f"doc_{doc_count}")
+def calculate_template_number(creation_timestamp, status):
+    if hasattr(creation_timestamp, 'to_pydatetime'):
+        creation_date = creation_timestamp.to_pydatetime()
+        # Remove timezone info if present
+        if creation_date.tzinfo is not None:
+            creation_date = creation_date.replace(tzinfo=None)
+    else:
+        creation_date = datetime.datetime.strptime(creation_timestamp, '%m/%d/%Y')
+    
+    today = datetime.datetime.now()
+    days_difference = (today - creation_date).days
+
+    template_index = -1
+    status_index = -1
+
+    if (days_difference > 0) and (days_difference <= 14):
+        template_index = 0
+        if status == "needPrescriptionOnly":
+            status_index = 0
+        elif status == "needMedicalRecords":
+            status_index = 1
+        else:
+            status_index = 2
+    elif (days_difference > 15) and (days_difference <= 28):
+        template_index = 1
+        if status == "needPrescriptionOnly":
+            status_index = 0
+        elif status == "needMedicalRecords":
+            status_index = 1
+        else:
+            status_index = 2
+    else:
+        template_index = 2
+        if status == "needPrescriptionOnly":
+            status_index = 0
+        elif status == "needMedicalRecords":
+            status_index = 1
+        else:
+            status_index = 2
+
+    return (template_index, status_index)
+
+
+def create_doc_folder(patient_full_name):
+    base_folder_path = os.path.join(PARENT_FOLDER, f"{patient_full_name}_RequestDocs")
+    doc_folder_path = os.path.join(base_folder_path, "doc")
+    counter = 1
+    while os.path.exists(doc_folder_path):
+        counter += 1
+        doc_folder_path = os.path.join(base_folder_path, f"doc{counter}")
+    
     os.makedirs(doc_folder_path, exist_ok=True)
     os.chmod(doc_folder_path, 0o777)
     return doc_folder_path
@@ -138,7 +156,7 @@ def generate_authorization_pdf(patient, patient_master_folder_path, authorizatio
         filled = PdfWrapper(authorization_template).fill(
             {
             "PatientName": f"{patient['First Name']} {patient['Last Name']}",
-            "PatientDOB": datetime.datetime.strptime(patient['DOB'], '%m/%d/%Y').strftime('%m/%d/%Y'),
+            "PatientDOB": patient['DOB'].strftime('%m/%d/%Y'),
             "Phone Number": patient['Phone Number'],
             "Signature": f"{patient['First Name']} {patient['Last Name']}",
             "Date": datetime.datetime.now().strftime('%m/%d/%Y'),
@@ -184,9 +202,9 @@ def generate_autofilled_prescription(patient, patient_master_folder_path, autofi
     foot = patient['Product'] == "Motus Foot"
 
     if patient['DOB']:
-        birth_month = datetime.datetime.strptime(patient['DOB'], '%m/%d/%Y').strftime('%m')
-        birth_day = datetime.datetime.strptime(patient['DOB'], '%m/%d/%Y').strftime('%d')
-        birth_year = datetime.datetime.strptime(patient['DOB'], '%m/%d/%Y').strftime('%Y')
+        birth_month = patient['DOB'].strftime('%m')
+        birth_day = patient['DOB'].strftime('%d')
+        birth_year = patient['DOB'].strftime('%Y')
     else:
         birth_month = ''
         birth_day = ''
@@ -215,21 +233,16 @@ def generate_autofilled_prescription(patient, patient_master_folder_path, autofi
     pdf_counter += 1
     return pdf_counter
 
-def generate_request_doc(patient, doc_folder_path, request_template, pdf_counter, doc_num):
+def generate_request_doc(patient, doc_folder_path, request_template, pdf_counter):
     if patient['DOB'] == "":
         pass
-    doc_name = ""
-    if doc_num == 1:
-        doc_name = patient['Prim Doc Name']
-        doc_fax_number = patient['Prim Doc Fax']
-    else:
-        doc_name = patient['Sec Doc Name']
-        doc_fax_number = patient['Sec Doc Fax']
+    doc_name = patient['Prim Doc Name']
+    doc_fax_number = patient['Prim Doc Fax']
 
-    motus_fax = pick_fax_number(birth_day = datetime.datetime.strptime(patient['DOB'], '%m/%d/%Y').strftime('%d') ,birth_month = datetime.datetime.strptime(patient['DOB'], '%m/%d/%Y').strftime('%m'))
+    motus_fax = pick_fax_number(birth_day = patient['DOB'].strftime('%d'), birth_month = patient['DOB'].strftime('%m'))
     patient_full_name_with_space = patient['First Name'] + ' ' + patient['Last Name']
     patient_full_name = patient['First Name'] + patient['Last Name']
-    request_pdf_path = os.path.join(doc_folder_path, f'Request_{patient_full_name}_doc{doc_num}.pdf')
+    request_pdf_path = os.path.join(doc_folder_path, f'Request_{patient_full_name}_doc.pdf')
     filled = PdfWrapper(request_template).fill(
         {
         'Date': datetime.datetime.now().strftime('%m/%d/%Y'),
@@ -238,7 +251,7 @@ def generate_request_doc(patient, doc_folder_path, request_template, pdf_counter
         'MotusFaxNumber': motus_fax,
         'MotusProduct': patient['Product'],
         'PatientName': patient_full_name_with_space,
-        'PatientDOB': patient['DOB'],
+        'PatientDOB': patient['DOB'].strftime('%m/%d/%Y'),
         'DocName': doc_name
         }
     )
@@ -304,6 +317,8 @@ def generate_fax_number_file(doc_name, doc_fax_number, doc_folder_path):
     f.close()
 
 def standardize_fax_number(fax_number):
+    if fax_number == None:
+        raise ValueError(f"None as a fax number: {fax_number}")
     cleaned_number = re.sub(r'\D', '', fax_number)
     if len(cleaned_number) == 10:
         return cleaned_number
@@ -313,10 +328,11 @@ def standardize_fax_number(fax_number):
 def send_completion_sms(total_time_seconds, total_patients, total_pdfs):
     phone_to_send = [DIVYESH_PHONE]
     client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-    message_body = (f"The process of generating PDFs for the Fax blast is completed.\n"
+    message_body = (f"The process of generating PDFs for the Fax blast is completed\n"
                     f"Total PDFs generated: {total_pdfs}\n"
-                    f"Total time taken: {total_time_seconds / 60} minutes.\n"
-                    f"Average time taken to generate PDFs per patient: {total_time_seconds / total_patients} seconds.")
+                    f"Total Patients Faxed: {total_patients}\n"
+                    f"Total time taken: {total_time_seconds / 60} minutes\n"
+                    f"Average time taken to generate PDFs per patient: {total_time_seconds / total_patients} seconds")
     for phone_number in phone_to_send:
         try:
             message = client.messages.create(
@@ -328,12 +344,23 @@ def send_completion_sms(total_time_seconds, total_patients, total_pdfs):
         except Exception as e:
             print(f"Failed to send SMS: {e}")
 
+def create_connection():
+    params = game_db_query.game_db_config()
+    game_db_conn = psycopg2.connect(**params)
+    game_db_cur = game_db_conn.cursor()
+    return game_db_conn, game_db_cur
+
 def main():
     start_time = time.time()
     sheets_service, drive_service = authenticate_services()
-    data = read_all_data_from_sheet(sheets_service, SHEET_ID, RANGE_NAME)
-    df = add_to_dataframe(data)
+    # data = read_all_data_from_sheet(sheets_service, SHEET_ID, RANGE_NAME)
+    # df = add_to_dataframe(data)
+    db_connection, db_cursor = create_connection()
+    df = get_patients_to_fax(db_cursor)
+    db_cursor.close()
+    db_connection.close()
     print("All the data has been read and stored in a dataframe!")
+    df.to_csv("all_patients_to_fax.csv", index=False)
     delete_folder(PARENT_FOLDER)
     create_folder(PARENT_FOLDER)
     template_paths = generate_template_paths()

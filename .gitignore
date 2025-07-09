@@ -7,3 +7,9 @@ templates_with_textboxes
 run.py
 RequestDocuments
 templates
+config.py
+database.ini
+game_db_utils
+_pycache_
+all_patients_to_fax.csv
+blaster_log.log
