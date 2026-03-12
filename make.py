@@ -353,8 +353,6 @@ def create_connection():
 def main():
     start_time = time.time()
     sheets_service, drive_service = authenticate_services()
-    # data = read_all_data_from_sheet(sheets_service, SHEET_ID, RANGE_NAME)
-    # df = add_to_dataframe(data)
     db_connection, db_cursor = create_connection()
     df = get_patients_to_fax(db_cursor)
     db_cursor.close()

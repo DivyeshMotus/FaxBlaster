@@ -1,12 +1,7 @@
 .env
 credentials.json
-data.csv
-making_templates
-making_templates
-templates_with_textboxes
 run.py
 RequestDocuments
-templates
 config.py
 database.ini
 game_db_utils
