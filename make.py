@@ -271,8 +271,6 @@ def classify_link(url: str) -> str:
         log(f"[CLASSIFY LINK] Unknown link type for: {url}")
         return None
 
-
-
 def generate_name(first_name, last_name):
     first_name = first_name if isinstance(first_name, str) else ""
     last_name = last_name if isinstance(last_name, str) else ""
