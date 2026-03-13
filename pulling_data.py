@@ -25,7 +25,8 @@ def get_patients_to_fax(cursor):
         c2.city_address AS city,
         c2.state,
         c2.zip_code,
-        c1.last_name AS doctor_name,
+        c1.first_name as doctor_first_name,
+        c1.last_name AS doctor_last_name,
         c1.doc_fax AS doctor_fax,
         s1.status,
         i.medical_records_auth_link
@@ -48,6 +49,7 @@ def get_patients_to_fax(cursor):
         )
     GROUP BY 
         s1.story_id,
+        c1.first_name,
         c1.last_name,
         c1.doc_fax,
         c2.contact_id,

@@ -1,5 +1,5 @@
 .env
-credentials.json
+google_credentials.json
 run.py
 RequestDocuments
 config.py
@@ -7,4 +7,4 @@ database.ini
 game_db_utils
 _pycache_
 all_patients_to_fax.csv
-blaster_log.log
+faxblaster.log

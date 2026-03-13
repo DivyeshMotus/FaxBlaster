@@ -11,7 +11,7 @@ load_dotenv()
 
 # Set your fax details from environment variables
 PARENT_FOLDER = 'RequestDocuments'  # Parent folder containing all subfolders with PDFs
-HUMBLEFAX_API_KEY = os.getenv('HUMBLEFAX_ACCESS_KEY')
+HUMBLEFAX_API_KEY = os.getenv('HUMBLEFAX_API_KEY')
 HUMBLEFAX_SECRET_KEY = os.getenv('HUMBLEFAX_SECRET_KEY')
 TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID')
 TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN')
