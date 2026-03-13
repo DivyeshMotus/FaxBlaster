@@ -133,6 +133,13 @@ def generate_pdfs(df, template_paths, drive_service):
     return (total_patients, pdf_counter)
 
 def patient_record_dictionary(record):
+    raw_fax = str(record[15]) if record[15] is not None else None
+    try:
+        cleaned_fax = standardize_fax_number(raw_fax)
+    except ValueError as e:
+        log(f"[PATIENT RECORD] WARNING — invalid fax number for record {record[1]}: '{raw_fax}' | {e}")
+        cleaned_fax = None
+
     patient = {
         'story_id': record[1],
         'Timestamp': record[2],
@@ -148,7 +155,7 @@ def patient_record_dictionary(record):
         'Zipcode': record[12],
         'Prim Doc First Name': record[13],
         'Prim Doc Last Name': record[14],
-        'Prim Doc Fax': standardize_fax_number(record[15]),
+        'Prim Doc Fax': cleaned_fax,
         'Status': record[16],
         'AuthorizationPDFLink': record[17]
     }
@@ -264,8 +271,10 @@ def classify_link(url: str) -> str:
         return None
 
 def generate_name(first_name, last_name):
-    first = " ".join(word.capitalize() for word in (first_name or "").strip().split())
-    last = " ".join(word.capitalize() for word in (last_name or "").strip().split())
+    first_name = first_name if isinstance(first_name, str) else ""
+    last_name = last_name if isinstance(last_name, str) else ""
+    first = " ".join(word.capitalize() for word in first_name.strip().split())
+    last = " ".join(word.capitalize() for word in last_name.strip().split())
     return f"{first} {last}".strip()
 
 def generate_authorization_pdf(patient, folder, template_path, drive_service, pdf_counter):

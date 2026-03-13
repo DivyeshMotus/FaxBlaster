@@ -42,11 +42,11 @@ template = patient_authorization_template(
 )
 
 # Create text boxes
-template.create_textbox("patient_name", 1, 107, 274, width=230)
-template.create_textbox("patient_dob", 1, 139, 300, width=230)
-template.create_textbox("patient_phone", 1, 150, 325, width=230)
-template.create_textbox("patient_name_2", 1, 185, 569, width=230)
-template.create_textbox("date", 1, 103, 627, width=230)
+template.create_textbox("patient_name", 1, 107, 276.5, width=230)
+template.create_textbox("patient_dob", 1, 139, 302.5, width=230)
+template.create_textbox("patient_phone", 1, 150, 327.5, width=230)
+template.create_textbox("patient_name_2", 1, 185, 571.5, width=230)
+template.create_textbox("date", 1, 103, 629.5, width=230)
 
 # Save the PDF
 template.save_pdf(
