@@ -42,6 +42,7 @@ TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID')
 TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN')
 TWILIO_PHONE_NUMBER = os.getenv('TWILIO_PHONE_NUMBER')
 DIVYESH_PHONE = os.getenv('DIVYESH_PHONE')
+NA_PATTERNS = {"#na", "#n/a", "na", "n/a", "none", "null", "-", "--"}
 
 def fill_and_flatten_pdf(template_path, output_path, field_data: dict):
     log(f"[FILL PDF] Opening template: {template_path}")
@@ -270,9 +271,17 @@ def classify_link(url: str) -> str:
         log(f"[CLASSIFY LINK] Unknown link type for: {url}")
         return None
 
+
+
 def generate_name(first_name, last_name):
     first_name = first_name if isinstance(first_name, str) else ""
     last_name = last_name if isinstance(last_name, str) else ""
+
+    # Treat placeholder values as empty
+    if first_name.strip().lower() in NA_PATTERNS:
+        first_name = ""
+    if last_name.strip().lower() in NA_PATTERNS:
+        last_name = ""
     first = " ".join(word.capitalize() for word in first_name.strip().split())
     last = " ".join(word.capitalize() for word in last_name.strip().split())
     return f"{first} {last}".strip()
