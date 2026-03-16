@@ -229,7 +229,7 @@ def download_aws_file_from_link(link, output_path):
     log(f"[AWS DOWNLOAD] Fetching from S3: {link}")
     pillow_heif.register_heif_opener()
     ALLOWED_IMAGE_MIME_PREFIX = "image/"
-    response = requests.get(link)
+    response = requests.get(link, timeout=30)
     response.raise_for_status()
     content = response.content
     mime = magic.from_buffer(content, mime=True)
@@ -295,7 +295,14 @@ def generate_authorization_pdf(patient, folder, template_path, drive_service, pd
         log(f"[AUTH PDF] Authorization link found: {link}")
         link_type = classify_link(link)
         if link_type == 'aws_s3':
-            download_aws_file_from_link(link, path)
+            try:
+                download_aws_file_from_link(link, path)
+            except requests.exceptions.Timeout:
+                log(f"[AUTH PDF] WARNING: S3 download timed out for {patient_name}. Skipping.")
+                return pdf_counter
+            except Exception as e:
+                log(f"[AUTH PDF] WARNING: S3 download failed for {patient_name}: {e}. Skipping.")
+                return pdf_counter
         elif link_type == 'google_drive':
             download_drive_file_from_link(link, path, drive_service)
         else:
