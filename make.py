@@ -20,7 +20,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 from pulling_data import *
-from config import *
+from configuration import *
 
 load_dotenv()
 
@@ -502,7 +502,7 @@ def send_completion_sms(total_time_seconds, total_patients, total_pdfs):
 
 def create_connection():
     log("[DB] Creating database connection...")
-    params = game_db_query.game_db_config()
+    params = game_db_config()
     game_db_conn = psycopg2.connect(**params)
     game_db_cur = game_db_conn.cursor()
     log("[DB] Connection established.")

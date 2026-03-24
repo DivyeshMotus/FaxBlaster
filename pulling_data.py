@@ -1,14 +1,9 @@
 import pandas as pd
 import numpy as np
 import sys
-sys.path.append('..')
-
-from game_db_utils import game_db_query
-
 import psycopg2
-from config import *
+from configuration import *
 import datetime
-import sys
 
 def get_patients_to_fax(cursor):
     table_query = '''
