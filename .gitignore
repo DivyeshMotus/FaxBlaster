@@ -2,7 +2,7 @@
 google_credentials.json
 run.py
 RequestDocuments
-configuration.py
+config.py
 database.ini
 game_db_utils
 _pycache_
