@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import sys
 import psycopg2
-from configuration import *
+from config import *
 import datetime
 
 def get_patients_to_fax(cursor):
