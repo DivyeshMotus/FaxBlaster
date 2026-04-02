@@ -29,7 +29,7 @@ def get_patients_to_fax(cursor):
     JOIN story_fresh s2
         ON s1.destination = s2.destination
         AND s2.type = 'prescriberFax'
-        AND s2.status = 'faxReady'
+        AND s2.status IN ('faxReady','aiConfirmedFax')
     LEFT JOIN contacts_fresh c1
         ON s2.origin = c1.contact_id
     LEFT JOIN contacts_fresh c2
