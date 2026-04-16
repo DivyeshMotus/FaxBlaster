@@ -20,6 +20,7 @@ def get_patients_to_fax(cursor):
         c2.city_address AS city,
         c2.state,
         c2.zip_code,
+        c1.contact_id as dotor_contact_id,
         c1.first_name as doctor_first_name,
         c1.last_name AS doctor_last_name,
         c1.doc_fax AS doctor_fax,
@@ -44,6 +45,7 @@ def get_patients_to_fax(cursor):
         )
     GROUP BY 
         s1.story_id,
+        c1.contact_id,
         c1.first_name,
         c1.last_name,
         c1.doc_fax,

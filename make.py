@@ -134,7 +134,7 @@ def generate_pdfs(df, template_paths, drive_service):
     return (total_patients, pdf_counter)
 
 def patient_record_dictionary(record):
-    raw_fax = str(record[15]) if record[15] is not None else None
+    raw_fax = str(record[16]) if record[16] is not None else None
     try:
         cleaned_fax = standardize_fax_number(raw_fax)
     except ValueError as e:
@@ -154,11 +154,12 @@ def patient_record_dictionary(record):
         'City': record[10],
         'State': record[11],
         'Zipcode': record[12],
-        'Prim Doc First Name': record[13],
-        'Prim Doc Last Name': record[14],
+        'Doctor Contact ID': record[13],
+        'Prim Doc First Name': record[14],
+        'Prim Doc Last Name': record[15],
         'Prim Doc Fax': cleaned_fax,
-        'Status': record[16],
-        'AuthorizationPDFLink': record[17]
+        'Status': record[17],
+        'AuthorizationPDFLink': record[18]
     }
     return patient
 
@@ -367,7 +368,9 @@ def generate_autofilled_prescription(patient, patient_master_folder_path, autofi
         'Birth Year': birth_year,
         'Foot Product': "Yes" if foot else "Off",
         'Hand Product': "Yes" if hand else "Off",
-        'Med Note': 'I am ordering the Motus Hand / Foot Rehabilitation System, a robotic based neuro-rehabilitation therapy system for use at home. My patient would functionally benefit from the active assistance and neuromuscular re-education to improve their active and passive range of motion, reduce tone, and increase strength. Additionally, it would improve fine and gross motor functions to assist in eating, dressing, walking and other activities of daily living.'
+        'Med Note': 'I am ordering the Motus Hand / Foot Rehabilitation System, a robotic based neuro-rehabilitation therapy system for use at home. My patient would functionally benefit from the active assistance and neuromuscular re-education to improve their active and passive range of motion, reduce tone, and increase strength. Additionally, it would improve fine and gross motor functions to assist in eating, dressing, walking and other activities of daily living.',
+        'DoctorContactID': int(patient['Doctor Contact ID']),
+        'OutgoingFaxNumber': patient['Prim Doc Fax'],
     })
 
     pdf_counter += 1

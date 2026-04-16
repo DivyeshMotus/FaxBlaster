@@ -9,3 +9,4 @@ _pycache_
 all_patients_to_fax.csv
 faxblaster.log
 blaster_log.log
+templates/test_files
