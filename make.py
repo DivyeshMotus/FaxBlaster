@@ -42,7 +42,7 @@ TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID')
 TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN')
 TWILIO_PHONE_NUMBER = os.getenv('TWILIO_PHONE_NUMBER')
 DIVYESH_PHONE = os.getenv('DIVYESH_PHONE')
-NA_PATTERNS = {"#na", "#n/a", "na", "n/a", "none", "null", "-", "--"}
+NA_PATTERNS = {"#na", "#n/a", "na", "n/a", "none", "null", "-", "--", "nan"}
 
 def fill_and_flatten_pdf(template_path, output_path, field_data: dict):
     log(f"[FILL PDF] Opening template: {template_path}")
@@ -141,6 +141,10 @@ def patient_record_dictionary(record):
         log(f"[PATIENT RECORD] WARNING — invalid fax number for record {record[1]}: '{raw_fax}' | {e}")
         cleaned_fax = None
 
+    cleaned_doctor_contact_id = clean_doctor_contact_id(record[13])
+    if cleaned_doctor_contact_id is None:
+        log(f"[PATIENT RECORD] WARNING — invalid or missing Doctor Contact ID for record {record[1]}: '{record[13]}'")
+
     patient = {
         'story_id': record[1],
         'Timestamp': record[2],
@@ -154,7 +158,7 @@ def patient_record_dictionary(record):
         'City': record[10],
         'State': record[11],
         'Zipcode': record[12],
-        'Doctor Contact ID': record[13],
+        'Doctor Contact ID': cleaned_doctor_contact_id,
         'Prim Doc First Name': record[14],
         'Prim Doc Last Name': record[15],
         'Prim Doc Fax': cleaned_fax,
@@ -352,6 +356,13 @@ def generate_autofilled_prescription(patient, patient_master_folder_path, autofi
         birth_year = ''
         log(f"[PRESCRIPTION] WARNING: DOB missing for {patient_full_name}, birth fields will be blank.")
 
+    doctor_contact_id = patient['Doctor Contact ID']
+    if doctor_contact_id is None:
+        log(f"[PRESCRIPTION] WARNING: Doctor Contact ID missing/invalid for {patient_full_name}, field will be blank.")
+        doctor_contact_id_value = ''
+    else:
+        doctor_contact_id_value = doctor_contact_id
+
     prescription_pdf_path = os.path.join(patient_master_folder_path, f'Prescription_{patient_full_name}.pdf')
     log(f"[PRESCRIPTION] Filling template: {autofilled_prescription_template}")
 
@@ -369,7 +380,7 @@ def generate_autofilled_prescription(patient, patient_master_folder_path, autofi
         'Foot Product': "Yes" if foot else "Off",
         'Hand Product': "Yes" if hand else "Off",
         'Med Note': 'I am ordering the Motus Hand / Foot Rehabilitation System, a robotic based neuro-rehabilitation therapy system for use at home. My patient would functionally benefit from the active assistance and neuromuscular re-education to improve their active and passive range of motion, reduce tone, and increase strength. Additionally, it would improve fine and gross motor functions to assist in eating, dressing, walking and other activities of daily living.',
-        'DoctorContactID': int(patient['Doctor Contact ID']),
+        'DoctorContactID': doctor_contact_id_value,
         'OutgoingFaxNumber': patient['Prim Doc Fax'],
     })
 
@@ -483,6 +494,39 @@ def standardize_fax_number(fax_number):
     else:
         raise ValueError(f"Invalid fax number (not 10 digits after cleaning): '{fax_number}' -> '{cleaned_number}'")
 
+def clean_doctor_contact_id(raw_value):
+    """
+    Returns a valid positive int doctor contact ID, or None if missing/invalid.
+    Handles None, NaN, 0, '0', '', 'nan', '#N/A', floats like 12345.0, etc.
+    """
+    if raw_value is None:
+        return None
+
+    # pandas NaN check (NaN != NaN)
+    try:
+        if pd.isna(raw_value):
+            return None
+    except (TypeError, ValueError):
+        pass
+
+    # Normalize to string for cleaning
+    s = str(raw_value).strip()
+    if s == '' or s.lower() in NA_PATTERNS:
+        return None
+
+    # Strip trailing .0 from pandas float coercion
+    s = re.sub(r'\.0+$', '', s)
+
+    try:
+        value = int(s)
+    except ValueError:
+        return None
+
+    if value <= 0:
+        return None
+
+    return value
+
 def send_completion_sms(total_time_seconds, total_patients, total_pdfs):
     log(f"\n[SMS] Sending completion SMS to {DIVYESH_PHONE}...")
     phone_to_send = [DIVYESH_PHONE]
@@ -521,6 +565,7 @@ def main():
 
     db_connection, db_cursor = create_connection()
     df = get_patients_to_fax(db_cursor)
+    log(f"[MAIN] Dataframe made. Total records fetched: {len(df)}")
     db_cursor.close()
     db_connection.close()
     log(f"[MAIN] Data loaded. Total records fetched: {len(df)}")
