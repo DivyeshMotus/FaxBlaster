@@ -395,7 +395,7 @@ if __name__ == '__main__':
     send_completion_sms(total_time_taken, total_faxes_sent, total_faxes_failed)
 
     # Step 4: Clean up request docs and data file
-    delete_folder('./RequestDocuments')
+    delete_folder(PARENT_FOLDER)
     delete_file('./data.csv')
 
     print("[START] FaxBlaster finished.")
