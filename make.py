@@ -11,6 +11,7 @@ import magic
 import img2pdf
 import pillow_heif
 import psycopg2
+import traceback
 import pandas as pd
 from PIL import Image
 from urllib.parse import urlparse
@@ -24,15 +25,11 @@ from config import *
 
 load_dotenv()
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(message)s',
-    handlers=[
-        logging.FileHandler('faxblaster.log', mode='w'),
-        logging.StreamHandler()
-    ]
-)
-
+# ---------------------------------------------------------------------------
+# log() — no file setup here, run_pipeline.py handles that.
+# When run via run_pipeline.py, all log() calls here automatically go to
+# the same timestamped log file because Python logging is process-global.
+# ---------------------------------------------------------------------------
 def log(message):
     logging.info(message)
 
@@ -67,10 +64,15 @@ def fill_and_flatten_pdf(template_path, output_path, field_data: dict):
 
 def authenticate_services():
     log("[AUTH] Authenticating Google Drive service account...")
-    credentials = service_account.Credentials.from_service_account_file('google_credentials.json', scopes=SCOPES)
-    drive_service = build('drive', 'v3', credentials=credentials)
-    log("[AUTH] Google Drive authentication successful.")
-    return drive_service
+    try:
+        credentials = service_account.Credentials.from_service_account_file('google_credentials.json', scopes=SCOPES)
+        drive_service = build('drive', 'v3', credentials=credentials)
+        log("[AUTH] Google Drive authentication successful.")
+        return drive_service
+    except Exception as e:
+        log(f"[AUTH] ERROR — authentication failed: {e}")
+        log(f"[AUTH] TRACEBACK:\n{traceback.format_exc()}")
+        raise
 
 def generate_template_paths():
     log("[TEMPLATES] Generating template paths...")
@@ -255,6 +257,7 @@ def download_aws_file_from_link(link, output_path):
             log(f"[AWS DOWNLOAD] img2pdf conversion successful -> {output_path}")
         except Exception as e:
             log(f"[AWS DOWNLOAD] img2pdf failed ({e}), falling back to Pillow...")
+            log(f"[AWS DOWNLOAD] TRACEBACK:\n{traceback.format_exc()}")
             image = Image.open(temp_img)
             image.convert("RGB").save(output_path)
             log(f"[AWS DOWNLOAD] Pillow fallback conversion successful -> {output_path}")
@@ -280,7 +283,6 @@ def generate_name(first_name, last_name):
     first_name = first_name if isinstance(first_name, str) else ""
     last_name = last_name if isinstance(last_name, str) else ""
 
-    # Treat placeholder values as empty
     if first_name.strip().lower() in NA_PATTERNS:
         first_name = ""
     if last_name.strip().lower() in NA_PATTERNS:
@@ -307,6 +309,7 @@ def generate_authorization_pdf(patient, folder, template_path, drive_service, pd
                 return pdf_counter
             except Exception as e:
                 log(f"[AUTH PDF] WARNING: S3 download failed for {patient_name}: {e}. Skipping.")
+                log(f"[AUTH PDF] TRACEBACK:\n{traceback.format_exc()}")
                 return pdf_counter
         elif link_type == 'google_drive':
             download_drive_file_from_link(link, path, drive_service)
@@ -479,12 +482,9 @@ def standardize_fax_number(fax_number):
     if fax_number is None or not isinstance(fax_number, str) or fax_number.strip() == '':
         raise ValueError(f"Invalid fax number: {fax_number}")
 
-    # Strip trailing .0 caused by pandas/DB storing numbers as floats
     fax_number = re.sub(r'\.0+$', '', fax_number.strip())
-
     cleaned_number = re.sub(r'\D', '', fax_number)
 
-    # Strip leading country code 1 or +1
     if len(cleaned_number) == 11 and cleaned_number.startswith('1'):
         cleaned_number = cleaned_number[1:]
 
@@ -502,19 +502,16 @@ def clean_doctor_contact_id(raw_value):
     if raw_value is None:
         return None
 
-    # pandas NaN check (NaN != NaN)
     try:
         if pd.isna(raw_value):
             return None
     except (TypeError, ValueError):
         pass
 
-    # Normalize to string for cleaning
     s = str(raw_value).strip()
     if s == '' or s.lower() in NA_PATTERNS:
         return None
 
-    # Strip trailing .0 from pandas float coercion
     s = re.sub(r'\.0+$', '', s)
 
     try:
@@ -546,14 +543,20 @@ def send_completion_sms(total_time_seconds, total_patients, total_pdfs):
             log(f"[SMS] Sent to {phone_number}: SID {message.sid}")
         except Exception as e:
             log(f"[SMS] Failed to send to {phone_number}: {e}")
+            log(f"[SMS] TRACEBACK:\n{traceback.format_exc()}")
 
 def create_connection():
     log("[DB] Creating database connection...")
-    params = game_db_config()
-    game_db_conn = psycopg2.connect(**params)
-    game_db_cur = game_db_conn.cursor()
-    log("[DB] Connection established.")
-    return game_db_conn, game_db_cur
+    try:
+        params = game_db_config()
+        game_db_conn = psycopg2.connect(**params)
+        game_db_cur = game_db_conn.cursor()
+        log("[DB] Connection established.")
+        return game_db_conn, game_db_cur
+    except Exception as e:
+        log(f"[DB] ERROR — could not connect to database: {e}")
+        log(f"[DB] TRACEBACK:\n{traceback.format_exc()}")
+        raise
 
 def main():
     log("=" * 60)

@@ -17,7 +17,38 @@ Testing note:
 import os
 import time
 import shutil
+import logging
 import datetime
+import traceback
+
+# ---------------------------------------------------------------------------
+# Logging setup — ONLY here in run_pipeline.py.
+# Creates a new timestamped log file every run, e.g.:
+#   logs/faxblaster-2026-04-24_09-30-00.log
+# Because Python logging is process-global, all log() calls from make.py
+# and send.py automatically flow into this same file too.
+# ---------------------------------------------------------------------------
+def _create_timestamp():
+    return datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+
+_logs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+os.makedirs(_logs_dir, exist_ok=True)
+_log_filename = os.path.join(_logs_dir, f'faxblaster-{_create_timestamp()}.log')
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+    handlers=[
+        logging.FileHandler(_log_filename, mode='w'),
+        logging.StreamHandler()
+    ]
+)
+
+def log(message):
+    logging.info(message)
+
+log(f"[PIPELINE] Log file created: {_log_filename}")
 
 # ---------------------------------------------------------------------------
 # Imports from the existing make.py (PDF generation side)
@@ -34,7 +65,6 @@ from make import (
     generate_autofilled_prescription,
     delete_folder,
     create_folder,
-    log,                        # The existing logger
     PARENT_FOLDER,              # 'RequestDocuments'
 )
 
@@ -50,7 +80,7 @@ from send import (
     get_fax_and_recipient_from_txt,
     create_tmp_fax,
     upload_attachment,
-    send_fax,                 # <-- COMMENTED OUT during testing
+    send_fax,
     delete_tmp_fax,
 )
 from send import send_completion_sms as send_fax_summary_sms
@@ -135,6 +165,7 @@ def process_one_patient(record, record_number, template_paths, drive_service, co
 
     except Exception as e:
         log(f"[PATIENT {record_number}] ERROR during PDF generation: {e}")
+        log(f"[PATIENT {record_number}] TRACEBACK:\n{traceback.format_exc()}")
         counters['failed'] += 1
         # Best-effort cleanup so we don't leave junk behind
         _safe_delete_patient_folder(patient_full_name)
@@ -182,6 +213,7 @@ def process_one_patient(record, record_number, template_paths, drive_service, co
 
     except Exception as e:
         log(f"[PATIENT {record_number}] ERROR during fax step: {e}")
+        log(f"[PATIENT {record_number}] TRACEBACK:\n{traceback.format_exc()}")
         counters['failed'] += 1
 
     # -----------------------------------------------------------------------
@@ -200,6 +232,7 @@ def _safe_delete_patient_folder(patient_full_name):
             log(f"[CLEANUP] Deleted patient folder: {outer_folder}")
         except Exception as e:
             log(f"[CLEANUP] Could not delete {outer_folder}: {e}")
+            log(f"[CLEANUP] TRACEBACK:\n{traceback.format_exc()}")
 
 
 # ---------------------------------------------------------------------------
@@ -267,10 +300,20 @@ def main():
         send_fax_summary_sms(total_time_seconds, total_processed, counters['failed'])
     except Exception as e:
         log(f"[PIPELINE] SMS send failed: {e}")
+        log(f"[PIPELINE] SMS TRACEBACK:\n{traceback.format_exc()}")
 
     # Final workspace cleanup
     delete_folder(PARENT_FOLDER)
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except Exception as e:
+        log(f"[PIPELINE] FATAL CRASH: {e}")
+        log(f"[PIPELINE] TRACEBACK:\n{traceback.format_exc()}")
+        try:
+            # -1 signals crash so SMS says "CRASHED" instead of normal summary
+            send_fax_summary_sms(0, 0, -1)
+        except Exception:
+            pass
