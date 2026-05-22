@@ -1,6 +1,7 @@
 import os
 import re
 import io
+import csv
 import fitz
 import time
 import shutil
@@ -40,6 +41,65 @@ TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN')
 TWILIO_PHONE_NUMBER = os.getenv('TWILIO_PHONE_NUMBER')
 DIVYESH_PHONE = os.getenv('DIVYESH_PHONE')
 NA_PATTERNS = {"#na", "#n/a", "na", "n/a", "none", "null", "-", "--", "nan"}
+
+# ---------------------------------------------------------------------------
+# Bad-fax CSV paths.
+# These are set by run_pipeline.py at startup (via module attribute assignment).
+# When make.py is run standalone, they stay None and _record_bad_fax() is a no-op.
+# ---------------------------------------------------------------------------
+DOC_FAX_NAN_CSV = None
+DOC_FAX_STOP_CSV = None
+DOC_FAX_OTHERS_CSV = None
+
+def _record_bad_fax(csv_path, story_id, doctor_contact_id, patient_contact_id):
+    """
+    Append one row (Story ID, Doctor Contact ID, Patient Contact ID) to the
+    specified bad-fax CSV. No-op if csv_path is None (standalone make.py runs).
+    """
+    if csv_path is None:
+        return
+    try:
+        with open(csv_path, 'a', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                story_id if story_id is not None else '',
+                doctor_contact_id if doctor_contact_id is not None else '',
+                patient_contact_id if patient_contact_id is not None else '',
+            ])
+        log(f"[BAD FAX CSV] Recorded story_id={story_id} -> {csv_path}")
+    except Exception as e:
+        log(f"[BAD FAX CSV] WARNING — could not append to {csv_path}: {e}")
+        log(f"[BAD FAX CSV] TRACEBACK:\n{traceback.format_exc()}")
+
+def _categorize_bad_fax(raw_fax, story_id, doctor_contact_id, patient_contact_id):
+    """
+    Decide which bucket a bad fax falls into and append a row to the matching CSV.
+    Called only when the existing fax-cleaning logic has already determined the
+    fax is bad (i.e., cleaned_fax is None).
+
+    Buckets:
+      - nan    : None, NaN, empty, or anything in NA_PATTERNS (e.g. 'nan', 'None', 'NULL')
+      - stop   : the literal string 'STOP' (case-insensitive, whitespace stripped)
+      - others : anything else that failed standardize_fax_number()
+    """
+    # Normalize raw_fax for comparison
+    if raw_fax is None:
+        normalized = ''
+    else:
+        try:
+            if pd.isna(raw_fax):
+                normalized = ''
+            else:
+                normalized = str(raw_fax).strip().lower()
+        except (TypeError, ValueError):
+            normalized = str(raw_fax).strip().lower()
+
+    if normalized == '' or normalized in NA_PATTERNS:
+        _record_bad_fax(DOC_FAX_NAN_CSV, story_id, doctor_contact_id, patient_contact_id)
+    elif normalized == 'stop':
+        _record_bad_fax(DOC_FAX_STOP_CSV, story_id, doctor_contact_id, patient_contact_id)
+    else:
+        _record_bad_fax(DOC_FAX_OTHERS_CSV, story_id, doctor_contact_id, patient_contact_id)
 
 def fill_and_flatten_pdf(template_path, output_path, field_data: dict):
     log(f"[FILL PDF] Opening template: {template_path}")
@@ -147,6 +207,22 @@ def patient_record_dictionary(record):
     if cleaned_doctor_contact_id is None:
         log(f"[PATIENT RECORD] WARNING — invalid or missing Doctor Contact ID for record {record[1]}: '{record[13]}'")
 
+    cleaned_patient_contact_id = clean_doctor_contact_id(record[19])
+    if cleaned_patient_contact_id is None:
+        log(f"[PATIENT RECORD] WARNING — invalid or missing Patient Contact ID for record {record[1]}: '{record[19]}'")
+
+    # --- NEW: if fax cleaning failed, categorize and record to the matching CSV.
+    # This runs alongside the existing logic above — it doesn't change cleaned_fax
+    # or any other field. Patient still gets cleaned_fax = None and flows through
+    # the pipeline exactly as before.
+    if cleaned_fax is None:
+        _categorize_bad_fax(
+            record[16],  # raw, untouched fax value from the DB
+            record[1],   # story_id
+            cleaned_doctor_contact_id,
+            cleaned_patient_contact_id,
+        )
+
     patient = {
         'story_id': record[1],
         'Timestamp': record[2],
@@ -165,7 +241,8 @@ def patient_record_dictionary(record):
         'Prim Doc Last Name': record[15],
         'Prim Doc Fax': cleaned_fax,
         'Status': record[17],
-        'AuthorizationPDFLink': record[18]
+        'AuthorizationPDFLink': record[18],
+        'Patient Contact ID': cleaned_patient_contact_id,
     }
     return patient
 

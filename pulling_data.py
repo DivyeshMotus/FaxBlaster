@@ -25,7 +25,8 @@ def get_patients_to_fax(cursor):
         c1.last_name AS doctor_last_name,
         c1.doc_fax AS doctor_fax,
         s1.status,
-        i.medical_records_auth_link
+        i.medical_records_auth_link,
+        c2.contact_id as patient_contact_id
     FROM story_fresh s1
     JOIN story_fresh s2
         ON s1.destination = s2.destination
