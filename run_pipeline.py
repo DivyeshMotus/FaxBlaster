@@ -15,11 +15,30 @@ Testing note:
 """
 
 import os
+import csv
+import glob
 import time
 import shutil
+import smtplib
 import logging
 import datetime
 import traceback
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.application import MIMEApplication
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# ---------------------------------------------------------------------------
+# Shared run timestamp — used by the log file AND the three bad-fax CSVs so
+# they all share the exact same suffix and can be correlated later.
+# ---------------------------------------------------------------------------
+def _create_timestamp():
+    return datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+
+RUN_TIMESTAMP = _create_timestamp()
 
 # ---------------------------------------------------------------------------
 # Logging setup — ONLY here in run_pipeline.py.
@@ -28,12 +47,9 @@ import traceback
 # Because Python logging is process-global, all log() calls from make.py
 # and send.py automatically flow into this same file too.
 # ---------------------------------------------------------------------------
-def _create_timestamp():
-    return datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-
 _logs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
 os.makedirs(_logs_dir, exist_ok=True)
-_log_filename = os.path.join(_logs_dir, f'faxblaster-{_create_timestamp()}.log')
+_log_filename = os.path.join(_logs_dir, f'faxblaster-{RUN_TIMESTAMP}.log')
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,8 +67,145 @@ def log(message):
 log(f"[PIPELINE] Log file created: {_log_filename}")
 
 # ---------------------------------------------------------------------------
+# Bad-fax CSV setup.
+# Three separate folders, each holding one timestamped CSV per run.
+# Headers: Story ID, Doctor Contact ID, Patient Contact ID.
+# Filenames share RUN_TIMESTAMP with the log file so a run can be traced
+# across all four files.
+# ---------------------------------------------------------------------------
+_base_dir = os.path.dirname(os.path.abspath(__file__))
+
+_doc_fax_nan_dir = os.path.join(_base_dir, 'doc_fax_nan')
+_doc_fax_stop_dir = os.path.join(_base_dir, 'doc_fax_stop')
+_doc_fax_others_dir = os.path.join(_base_dir, 'doc_fax_others')
+
+for d in (_doc_fax_nan_dir, _doc_fax_stop_dir, _doc_fax_others_dir):
+    os.makedirs(d, exist_ok=True)
+
+DOC_FAX_NAN_CSV = os.path.join(_doc_fax_nan_dir, f'doc_fax_nan_{RUN_TIMESTAMP}.csv')
+DOC_FAX_STOP_CSV = os.path.join(_doc_fax_stop_dir, f'doc_fax_stop_{RUN_TIMESTAMP}.csv')
+DOC_FAX_OTHERS_CSV = os.path.join(_doc_fax_others_dir, f'doc_fax_others_{RUN_TIMESTAMP}.csv')
+
+def _init_bad_fax_csv(path):
+    """Create a fresh CSV with just the header row."""
+    with open(path, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['Story ID', 'Doctor Contact ID', 'Patient Contact ID'])
+    log(f"[PIPELINE] Bad-fax CSV initialized: {path}")
+
+_init_bad_fax_csv(DOC_FAX_NAN_CSV)
+_init_bad_fax_csv(DOC_FAX_STOP_CSV)
+_init_bad_fax_csv(DOC_FAX_OTHERS_CSV)
+
+# ---------------------------------------------------------------------------
+# Email config (reads from .env).
+# EMAIL_USER  -> sending Gmail address
+# EMAIL_PASS  -> Gmail APP PASSWORD for that address (not the normal password)
+# EMAIL_TO    -> recipient address
+# ---------------------------------------------------------------------------
+SMTP_SERVER = "smtp.gmail.com"
+SMTP_PORT = 587
+EMAIL_USER = os.getenv("EMAIL_USER")
+EMAIL_PASS = os.getenv("EMAIL_PASS")
+EMAIL_TO = os.getenv("EMAIL_TO")
+
+def _find_previous_csv(folder):
+    """
+    Return the path to the SECOND-newest CSV in `folder` — i.e. the run right
+    before this one. The newest file is this run's CSV (created at startup),
+    so the previous run is the 2nd-newest.
+
+    Files are sorted by the timestamp embedded in their filename
+    (doc_fax_*_YYYY-MM-DD_HH-MM-SS.csv), which sorts correctly as plain text.
+    Returns None if there is no previous file (e.g. the very first run).
+    """
+    csv_files = glob.glob(os.path.join(folder, "*.csv"))
+    if len(csv_files) < 2:
+        return None
+    # Lexical sort on filename == chronological sort, thanks to the timestamp format.
+    csv_files.sort(key=os.path.basename)
+    return csv_files[-2]  # 2nd-newest
+
+
+def email_bad_fax_csvs():
+    """
+    Email the PREVIOUS run's three bad-fax CSVs to EMAIL_TO.
+
+    In each of the three folders the newest CSV is THIS run's (created at
+    startup), so the "previous run" is the 2nd-newest file. If a folder has
+    no previous file (first run ever), that attachment is skipped. If no
+    folder has a previous file at all, no email is sent.
+    """
+    if not (EMAIL_USER and EMAIL_PASS and EMAIL_TO):
+        log("[EMAIL] Skipped — EMAIL_USER / EMAIL_PASS / EMAIL_TO not all set in .env")
+        return
+
+    folder_specs = [
+        (_doc_fax_nan_dir, "Missing / NA fax numbers"),
+        (_doc_fax_stop_dir, "STOP fax numbers"),
+        (_doc_fax_others_dir, "Other invalid fax numbers"),
+    ]
+
+    msg = MIMEMultipart()
+    msg["From"] = EMAIL_USER
+    msg["To"] = EMAIL_TO
+
+    body_lines = ["Previous run's bad-fax CSV report.", ""]
+    attached_any = False
+    prev_stamp = None
+
+    for folder, label in folder_specs:
+        prev_path = _find_previous_csv(folder)
+        if prev_path is None:
+            body_lines.append(f"- {label}: no previous CSV found")
+            continue
+
+        # Remember the timestamp from the filename for the subject line.
+        if prev_stamp is None:
+            base = os.path.basename(prev_path)
+            prev_stamp = base.replace(".csv", "").split("_", 3)[-1]  # the date_time part
+
+        try:
+            with open(prev_path, "r", newline="") as f:
+                rows = max(len([ln for ln in f.read().splitlines() if ln.strip()]) - 1, 0)
+        except Exception:
+            rows = -1
+        row_text = f"{rows} row(s)" if rows >= 0 else "row count unavailable"
+        body_lines.append(f"- {label}: {os.path.basename(prev_path)} ({row_text})")
+
+        with open(prev_path, "rb") as f:
+            part = MIMEApplication(f.read(), _subtype="csv")
+        part.add_header("Content-Disposition", "attachment",
+                        filename=os.path.basename(prev_path))
+        msg.attach(part)
+        attached_any = True
+
+    if not attached_any:
+        log("[EMAIL] No previous-run CSVs found in any folder — nothing to send.")
+        return
+
+    msg["Subject"] = f"Bad-Fax CSV Report (previous run) - {prev_stamp or 'unknown'}"
+    msg.attach(MIMEText("\n".join(body_lines), "plain"))
+
+    server = None
+    try:
+        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+        server.starttls()
+        server.login(EMAIL_USER, EMAIL_PASS)
+        server.send_message(msg)
+        log(f"[EMAIL] Previous-run bad-fax CSVs emailed to {EMAIL_TO}")
+    except Exception as e:
+        log(f"[EMAIL] Failed to send: {e}")
+        log(f"[EMAIL] TRACEBACK:\n{traceback.format_exc()}")
+    finally:
+        if server:
+            server.quit()
+
+# ---------------------------------------------------------------------------
 # Imports from the existing make.py (PDF generation side)
 # ---------------------------------------------------------------------------
+import make  # imported as module so we can set its CSV-path globals below
+
 from make import (
     authenticate_services,      # Google Drive auth
     create_connection,          # Postgres connection
@@ -67,6 +220,12 @@ from make import (
     create_folder,
     PARENT_FOLDER,              # 'RequestDocuments'
 )
+
+# Hand the three CSV paths to make.py so its _record_bad_fax() helper can find them.
+make.DOC_FAX_NAN_CSV = DOC_FAX_NAN_CSV
+make.DOC_FAX_STOP_CSV = DOC_FAX_STOP_CSV
+make.DOC_FAX_OTHERS_CSV = DOC_FAX_OTHERS_CSV
+log("[PIPELINE] Bad-fax CSV paths injected into make module.")
 
 # `get_patients_to_fax` lives in pulling_data.py
 from pulling_data import get_patients_to_fax
@@ -244,6 +403,15 @@ def main():
     log("[PIPELINE] Starting per-patient FaxBlaster pipeline")
     log(f"[PIPELINE] DRY_RUN_SEND is {'ON (no real faxes)' if DRY_RUN_SEND else 'OFF (real faxes will send)'}")
     log("=" * 60)
+
+    # Email the PREVIOUS run's bad-fax CSVs (2nd-latest in each folder) at
+    # startup. This run's CSVs already exist (created at import time) and are
+    # the newest, so the 2nd-latest is the previous run's completed files.
+    try:
+        email_bad_fax_csvs()
+    except Exception as e:
+        log(f"[PIPELINE] Email send failed: {e}")
+        log(f"[PIPELINE] Email TRACEBACK:\n{traceback.format_exc()}")
 
     start_time = time.time()
 
