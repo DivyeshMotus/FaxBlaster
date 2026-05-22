@@ -109,32 +109,27 @@ EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASS = os.getenv("EMAIL_PASS")
 EMAIL_TO = os.getenv("EMAIL_TO")
 
-def _find_previous_csv(folder):
+def _find_latest_csv(folder):
     """
-    Return the path to the SECOND-newest CSV in `folder` — i.e. the run right
-    before this one. The newest file is this run's CSV (created at startup),
-    so the previous run is the 2nd-newest.
-
-    Files are sorted by the timestamp embedded in their filename
-    (doc_fax_*_YYYY-MM-DD_HH-MM-SS.csv), which sorts correctly as plain text.
-    Returns None if there is no previous file (e.g. the very first run).
+    Return the path to the NEWEST (latest) CSV in `folder` by the timestamp
+    embedded in its filename (doc_fax_*_YYYY-MM-DD_HH-MM-SS.csv), which sorts
+    correctly as plain text. Returns None if the folder has no CSV files.
     """
     csv_files = glob.glob(os.path.join(folder, "*.csv"))
-    if len(csv_files) < 2:
+    if not csv_files:
         return None
     # Lexical sort on filename == chronological sort, thanks to the timestamp format.
     csv_files.sort(key=os.path.basename)
-    return csv_files[-2]  # 2nd-newest
+    return csv_files[-1]  # newest
 
 
 def email_bad_fax_csvs():
     """
-    Email the PREVIOUS run's three bad-fax CSVs to EMAIL_TO.
+    Email the LATEST bad-fax CSV from each of the three folders to EMAIL_TO.
 
-    In each of the three folders the newest CSV is THIS run's (created at
-    startup), so the "previous run" is the 2nd-newest file. If a folder has
-    no previous file (first run ever), that attachment is skipped. If no
-    folder has a previous file at all, no email is sent.
+    Called at the END of the run, so each folder's newest CSV is this run's
+    file (it was filled during the patient loop). If a folder has no CSV at
+    all, that attachment is skipped. If no folder has any CSV, no email is sent.
     """
     if not (EMAIL_USER and EMAIL_PASS and EMAIL_TO):
         log("[EMAIL] Skipped — EMAIL_USER / EMAIL_PASS / EMAIL_TO not all set in .env")
@@ -150,41 +145,41 @@ def email_bad_fax_csvs():
     msg["From"] = EMAIL_USER
     msg["To"] = EMAIL_TO
 
-    body_lines = ["Previous run's bad-fax CSV report.", ""]
+    body_lines = ["Bad-fax CSV report.", ""]
     attached_any = False
-    prev_stamp = None
+    latest_stamp = None
 
     for folder, label in folder_specs:
-        prev_path = _find_previous_csv(folder)
-        if prev_path is None:
-            body_lines.append(f"- {label}: no previous CSV found")
+        latest_path = _find_latest_csv(folder)
+        if latest_path is None:
+            body_lines.append(f"- {label}: no CSV found")
             continue
 
         # Remember the timestamp from the filename for the subject line.
-        if prev_stamp is None:
-            base = os.path.basename(prev_path)
-            prev_stamp = base.replace(".csv", "").split("_", 3)[-1]  # the date_time part
+        if latest_stamp is None:
+            base = os.path.basename(latest_path)
+            latest_stamp = base.replace(".csv", "").split("_", 3)[-1]  # the date_time part
 
         try:
-            with open(prev_path, "r", newline="") as f:
+            with open(latest_path, "r", newline="") as f:
                 rows = max(len([ln for ln in f.read().splitlines() if ln.strip()]) - 1, 0)
         except Exception:
             rows = -1
         row_text = f"{rows} row(s)" if rows >= 0 else "row count unavailable"
-        body_lines.append(f"- {label}: {os.path.basename(prev_path)} ({row_text})")
+        body_lines.append(f"- {label}: {os.path.basename(latest_path)} ({row_text})")
 
-        with open(prev_path, "rb") as f:
+        with open(latest_path, "rb") as f:
             part = MIMEApplication(f.read(), _subtype="csv")
         part.add_header("Content-Disposition", "attachment",
-                        filename=os.path.basename(prev_path))
+                        filename=os.path.basename(latest_path))
         msg.attach(part)
         attached_any = True
 
     if not attached_any:
-        log("[EMAIL] No previous-run CSVs found in any folder — nothing to send.")
+        log("[EMAIL] No CSVs found in any folder — nothing to send.")
         return
 
-    msg["Subject"] = f"Bad-Fax CSV Report (previous run) - {prev_stamp or 'unknown'}"
+    msg["Subject"] = f"Bad-Fax CSV Report - {latest_stamp or 'unknown'}"
     msg.attach(MIMEText("\n".join(body_lines), "plain"))
 
     server = None
@@ -193,7 +188,7 @@ def email_bad_fax_csvs():
         server.starttls()
         server.login(EMAIL_USER, EMAIL_PASS)
         server.send_message(msg)
-        log(f"[EMAIL] Previous-run bad-fax CSVs emailed to {EMAIL_TO}")
+        log(f"[EMAIL] Latest bad-fax CSVs emailed to {EMAIL_TO}")
     except Exception as e:
         log(f"[EMAIL] Failed to send: {e}")
         log(f"[EMAIL] TRACEBACK:\n{traceback.format_exc()}")
@@ -404,15 +399,6 @@ def main():
     log(f"[PIPELINE] DRY_RUN_SEND is {'ON (no real faxes)' if DRY_RUN_SEND else 'OFF (real faxes will send)'}")
     log("=" * 60)
 
-    # Email the PREVIOUS run's bad-fax CSVs (2nd-latest in each folder) at
-    # startup. This run's CSVs already exist (created at import time) and are
-    # the newest, so the 2nd-latest is the previous run's completed files.
-    try:
-        email_bad_fax_csvs()
-    except Exception as e:
-        log(f"[PIPELINE] Email send failed: {e}")
-        log(f"[PIPELINE] Email TRACEBACK:\n{traceback.format_exc()}")
-
     start_time = time.time()
 
     # --- Setup: auth, DB, templates, clean workspace ---
@@ -469,6 +455,14 @@ def main():
     except Exception as e:
         log(f"[PIPELINE] SMS send failed: {e}")
         log(f"[PIPELINE] SMS TRACEBACK:\n{traceback.format_exc()}")
+
+    # Email the latest bad-fax CSV from each folder (this run's files, since
+    # this runs after the patient loop has finished filling them).
+    try:
+        email_bad_fax_csvs()
+    except Exception as e:
+        log(f"[PIPELINE] Email send failed: {e}")
+        log(f"[PIPELINE] Email TRACEBACK:\n{traceback.format_exc()}")
 
     # Final workspace cleanup
     delete_folder(PARENT_FOLDER)
