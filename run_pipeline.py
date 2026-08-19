@@ -27,6 +27,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.application import MIMEApplication
 
+import pandas as pd
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -78,13 +79,21 @@ _base_dir = os.path.dirname(os.path.abspath(__file__))
 _doc_fax_nan_dir = os.path.join(_base_dir, 'doc_fax_nan')
 _doc_fax_stop_dir = os.path.join(_base_dir, 'doc_fax_stop')
 _doc_fax_others_dir = os.path.join(_base_dir, 'doc_fax_others')
+# Fourth folder: patients removed by the eligibility filter (stale claims).
+# NOTE this one is different in kind from the three above — those record a
+# patient but still fax them; this one records patients that were REMOVED
+# from the run and never faxed.
+_doc_fax_suppressed_dir = os.path.join(_base_dir, 'doc_fax_suppressed')
 
-for d in (_doc_fax_nan_dir, _doc_fax_stop_dir, _doc_fax_others_dir):
+for d in (_doc_fax_nan_dir, _doc_fax_stop_dir, _doc_fax_others_dir,
+          _doc_fax_suppressed_dir):
     os.makedirs(d, exist_ok=True)
 
 DOC_FAX_NAN_CSV = os.path.join(_doc_fax_nan_dir, f'doc_fax_nan_{RUN_TIMESTAMP}.csv')
 DOC_FAX_STOP_CSV = os.path.join(_doc_fax_stop_dir, f'doc_fax_stop_{RUN_TIMESTAMP}.csv')
 DOC_FAX_OTHERS_CSV = os.path.join(_doc_fax_others_dir, f'doc_fax_others_{RUN_TIMESTAMP}.csv')
+DOC_FAX_SUPPRESSED_CSV = os.path.join(
+    _doc_fax_suppressed_dir, f'doc_fax_suppressed_{RUN_TIMESTAMP}.csv')
 
 def _init_bad_fax_csv(path):
     """Create a fresh CSV with just the header row."""
@@ -93,9 +102,18 @@ def _init_bad_fax_csv(path):
         writer.writerow(['Story ID', 'Doctor Contact ID', 'Patient Contact ID'])
     log(f"[PIPELINE] Bad-fax CSV initialized: {path}")
 
+def _init_suppressed_csv(path):
+    """Suppressed CSV has an extra 'Reason' column, so it gets its own header."""
+    with open(path, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['Story ID', 'Doctor Contact ID', 'Patient Contact ID',
+                         'Reason'])
+    log(f"[PIPELINE] Suppressed CSV initialized: {path}")
+
 _init_bad_fax_csv(DOC_FAX_NAN_CSV)
 _init_bad_fax_csv(DOC_FAX_STOP_CSV)
 _init_bad_fax_csv(DOC_FAX_OTHERS_CSV)
+_init_suppressed_csv(DOC_FAX_SUPPRESSED_CSV)
 
 # ---------------------------------------------------------------------------
 # Email config (reads from .env).
@@ -139,6 +157,7 @@ def email_bad_fax_csvs():
         (_doc_fax_nan_dir, "Missing / NA fax numbers"),
         (_doc_fax_stop_dir, "STOP fax numbers"),
         (_doc_fax_others_dir, "Other invalid fax numbers"),
+        (_doc_fax_suppressed_dir, "Suppressed - stale claims (NOT faxed)"),
     ]
 
     msg = MIMEMultipart()
@@ -238,6 +257,157 @@ from send import (
     delete_tmp_fax,
 )
 from send import send_completion_sms as send_fax_summary_sms
+
+
+# ---------------------------------------------------------------------------
+# Fax-blast eligibility filter
+# ---------------------------------------------------------------------------
+# Purpose: stop faxing claims that nobody is working any more.
+#
+# A patient is REMOVED from the run only when EVERY one of these is true:
+#   1. status is one of the 3 "need*" statuses   -> already enforced in SQL
+#   2. the insurance claim was created  > 12 weeks ago
+#   3. the insurance story was updated  > 6 weeks ago
+#   4. the patient contact was updated  > 6 weeks ago
+#   5. the doctor contact was updated   > 6 weeks ago
+#   6. the prescriberFax story was updated > 6 weeks ago
+#
+# ANY sign of recent activity means we still send the fax.
+#
+# NULL handling: a missing date means "unknown", NOT "stale" — we still fax.
+# This is deliberate and conservative: never silently drop a patient because
+# of a gap in the data.
+# ---------------------------------------------------------------------------
+
+CLAIM_AGE_DAYS = 84    # 12 weeks — how old the claim must be
+STALE_DAYS = 42        # 6 weeks  — how long since any update
+
+# Column names produced by get_patients_to_fax(). Keep in sync with the SQL.
+COL_CLAIM_CREATED = 'claim_created_at'
+COL_INSURANCE_UPDATED = 'insurance_last_update'
+COL_PATIENT_UPDATED = 'patient_contact_last_update'
+COL_DOCTOR_UPDATED = 'doctor_contact_last_update'
+COL_PRESCRIBER_FAX_UPDATED = 'prescriber_fax_last_update'
+
+
+def _record_suppressed(story_id, doctor_contact_id, patient_contact_id, reason):
+    """Append one row to the suppressed CSV. Never raises."""
+    try:
+        with open(DOC_FAX_SUPPRESSED_CSV, 'a', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                story_id if story_id is not None else '',
+                doctor_contact_id if doctor_contact_id is not None else '',
+                patient_contact_id if patient_contact_id is not None else '',
+                reason,
+            ])
+    except Exception as e:
+        log(f"[FILTER] WARNING — could not append to suppressed CSV: {e}")
+        log(f"[FILTER] TRACEBACK:\n{traceback.format_exc()}")
+
+
+def _days_since(value):
+    """
+    Whole days between `value` and now.
+    Returns None if the value is missing or cannot be parsed — callers treat
+    None as "unknown", which means the patient still gets faxed.
+    """
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+
+    ts = pd.to_datetime(value, utc=True, errors='coerce')
+    if ts is None or pd.isna(ts):
+        return None
+
+    return (pd.Timestamp.now(tz='UTC') - ts).days
+
+
+def _evaluate_row(row):
+    """
+    Decide whether one patient row should be suppressed.
+    Returns (should_suppress: bool, detail: str).
+    The detail string is logged either way so a run can be audited.
+    """
+    checks = [
+        ('claim_age',      _days_since(row.get(COL_CLAIM_CREATED)),          CLAIM_AGE_DAYS),
+        ('insurance',      _days_since(row.get(COL_INSURANCE_UPDATED)),      STALE_DAYS),
+        ('patient_contact',_days_since(row.get(COL_PATIENT_UPDATED)),        STALE_DAYS),
+        ('doctor_contact', _days_since(row.get(COL_DOCTOR_UPDATED)),         STALE_DAYS),
+        ('prescriber_fax', _days_since(row.get(COL_PRESCRIBER_FAX_UPDATED)), STALE_DAYS),
+    ]
+
+    for label, days, threshold in checks:
+        if days is None:
+            return False, f"kept: {label} date missing (unknown -> still fax)"
+        if days <= threshold:
+            return False, f"kept: {label} updated {days}d ago (<= {threshold}d)"
+
+    detail = ', '.join(f"{label}={days}d" for label, days, _ in checks)
+    return True, f"suppressed: all stale ({detail})"
+
+
+def apply_eligibility_filter(df):
+    """
+    Remove stale claims from the fax list.
+
+    Unlike the three bad-fax CSVs (which record a patient but still fax them),
+    rows dropped here are genuinely removed and never faxed.
+
+    If the expected date columns are missing entirely — e.g. running against an
+    older SQL query — the filter no-ops and logs a warning rather than
+    suppressing everyone or crashing.
+    """
+    required = [COL_CLAIM_CREATED, COL_INSURANCE_UPDATED, COL_PATIENT_UPDATED,
+                COL_DOCTOR_UPDATED, COL_PRESCRIBER_FAX_UPDATED]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        log(f"[FILTER] SKIPPED — query is missing column(s): {missing}")
+        log("[FILTER] No patients suppressed. Update pulling_data.py to add them.")
+        return df
+
+    if len(df) == 0:
+        log("[FILTER] No records to filter.")
+        return df
+
+    kept_rows = []
+    suppressed = 0
+
+    for row in df.to_dict('records'):
+        story_id = row.get('story_id')
+        try:
+            should_suppress, detail = _evaluate_row(row)
+        except Exception as e:
+            # Never let a filter bug drop a patient — fail open (still fax).
+            log(f"[FILTER] ERROR evaluating story_id={story_id}: {e} — keeping patient.")
+            log(f"[FILTER] TRACEBACK:\n{traceback.format_exc()}")
+            kept_rows.append(row)
+            continue
+
+        if should_suppress:
+            suppressed += 1
+            log(f"[FILTER] SUPPRESS story_id={story_id} | {detail}")
+            _record_suppressed(
+                story_id,
+                row.get('dotor_contact_id'),    # column name has the original typo
+                row.get('patient_contact_id'),
+                detail,
+            )
+        else:
+            kept_rows.append(row)
+
+    log("=" * 60)
+    log(f"[FILTER] Records in        : {len(df)}")
+    log(f"[FILTER] Suppressed (stale): {suppressed}")
+    log(f"[FILTER] Remaining to fax  : {len(kept_rows)}")
+    log(f"[FILTER] Thresholds        : claim > {CLAIM_AGE_DAYS}d, updates > {STALE_DAYS}d")
+    log("=" * 60)
+
+    return pd.DataFrame(kept_rows, columns=df.columns)
 
 
 # ---------------------------------------------------------------------------
@@ -410,6 +580,13 @@ def main():
     db_cursor.close()
     db_connection.close()
 
+    # Full unfiltered pull, kept for auditing what the filter removed.
+    df.to_csv("all_patients_to_fax_unfiltered.csv", index=False)
+    log("[PIPELINE] Saved unfiltered patient data to all_patients_to_fax_unfiltered.csv")
+
+    # --- Eligibility filter: drop stale claims before anything is generated ---
+    df = apply_eligibility_filter(df)
+
     df.to_csv("all_patients_to_fax.csv", index=False)
     log("[PIPELINE] Saved patient data to all_patients_to_fax.csv")
 
@@ -432,6 +609,7 @@ def main():
     }
 
     total_records = len(df)
+    log(f"[PIPELINE] Records to process after eligibility filter: {total_records}")
     for i, record in enumerate(df.itertuples(), start=1):
         process_one_patient(record, i, template_paths, drive_service, counters)
 
